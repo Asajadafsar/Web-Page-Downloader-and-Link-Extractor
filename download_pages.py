@@ -1,161 +1,135 @@
-import os
+#library python
 import requests
 from bs4 import BeautifulSoup
-import zipfile
 from urllib.parse import urljoin, urlparse
-from requests.adapters import HTTPAdapter
-from requests.packages.urllib3.util.retry import Retry
+import os
+import zipfile
+import customtkinter as ctk
+from tkinter import messagebox, filedialog
+import threading
 
-def download_file(url, base_folder, session):
-    """
-    Download a file from a URL and save it to a folder, maintaining directory structure.
-    """
-    try:
-        response = session.get(url, stream=True)
-        response.raise_for_status()  # Check for HTTP errors
-        parsed_url = urlparse(url)
-        path = parsed_url.path
-        file_name = os.path.basename(path)
-        
-        # Handle empty file name (e.g., trailing slashes)
-        if not file_name:
-            file_name = 'index.html'
-        
-        # Create the folder structure
-        folder_path = os.path.join(base_folder, os.path.dirname(path.lstrip('/')))
-        os.makedirs(folder_path, exist_ok=True)
-        
-        file_path = os.path.join(folder_path, file_name)
-        
-        with open(file_path, 'wb') as file:
-            file.write(response.content)
-        return file_path
-    except requests.RequestException as e:
-        print(f"Error downloading {url}: {e}")
-        return None
 
-def download_page(url, base_folder, session):
-    """
-    Download a page and its associated assets (CSS, JS, images) into the appropriate directories.
-    """
-    try:
-        response = session.get(url)
-        response.raise_for_status()  # Check for HTTP errors
-        soup = BeautifulSoup(response.text, 'html.parser')
-        
-        # Save the HTML page
-        parsed_url = urlparse(url)
-        path = parsed_url.path
-        file_name = os.path.basename(path) or 'index.html'
-        folder_path = os.path.join(base_folder, os.path.dirname(path.lstrip('/')))
-        os.makedirs(folder_path, exist_ok=True)
-        html_filename = os.path.join(folder_path, file_name)
-        
-        with open(html_filename, 'w', encoding='utf-8') as file:
-            file.write(soup.prettify())
-        
-        print(f"Downloaded {html_filename}")
-        
-        # Download linked CSS, JS, and images
-        for tag in soup.find_all(['link', 'script', 'img']):
-            src = tag.get('href') or tag.get('src')
-            if src:
-                asset_url = urljoin(url, src)
-                asset_path = download_file(asset_url, base_folder, session)
-                if asset_path:
-                    # Update HTML references to local files
-                    if tag.name == 'link':
-                        tag['href'] = os.path.relpath(asset_path, base_folder)
-                    elif tag.name == 'script':
-                        tag['src'] = os.path.relpath(asset_path, base_folder)
-                    elif tag.name == 'img':
-                        tag['src'] = os.path.relpath(asset_path, base_folder)
-        
-        # Save updated HTML with local asset references
-        with open(html_filename, 'w', encoding='utf-8') as file:
-            file.write(soup.prettify())
-    except requests.RequestException as e:
-        print(f"Error downloading page {url}: {e}")
 
-def download_website(url, output_folder):
+#Get urls
+#check Urls Not agin
+#Get and save Urls
+#processing and save css/js/images and....
+def fetch_and_save_html_resources(base_url, urls, output_dir):
     """
-    Download the website and save it to a specified folder.
+    Fetch and save specified HTML pages and their resources (CSS, JS, images) from the base URL to the specified directory.
     """
-    os.makedirs(output_folder, exist_ok=True)
-    
-    # Create a session with retry mechanism
-    session = requests.Session()
-    retries = Retry(total=5, backoff_factor=1, status_forcelist=[502, 503, 504])
-    session.mount('https://', HTTPAdapter(max_retries=retries))
-    session.mount('http://', HTTPAdapter(max_retries=retries))
+    visited = set()
 
-    # Download the main page and assets
-    download_page(url, output_folder, session)
+    for url in urls:
+        current_url = url.strip()
+        if current_url in visited:
+            continue
+        visited.add(current_url)
 
-def compress_folder(folder, output_zip):
+        try:
+            response = requests.get(current_url)
+            response.raise_for_status()
+            soup = BeautifulSoup(response.text, 'html.parser')
+
+            # Save HTML content
+            path = urlparse(current_url).path
+            if path == '':
+                path = '/index.html'
+            file_path = os.path.join(output_dir, path.lstrip('/'))
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+            with open(file_path, 'w', encoding='utf-8') as file:
+                file.write(response.text)
+
+            # Process and save CSS, JS, and images
+            for resource_type, attr in [('link', 'href'), ('script', 'src'), ('img', 'src')]:
+                for resource in soup.find_all(resource_type, **{attr: True}):
+                    src = resource.get(attr)
+                    full_url = urljoin(current_url, src)
+                    resource_path = urlparse(full_url).path
+                    if resource_path:
+                        resource_file_path = os.path.join(output_dir, resource_path.lstrip('/'))
+                        if not os.path.exists(resource_file_path):
+                            try:
+                                res = requests.get(full_url)
+                                res.raise_for_status()
+                                os.makedirs(os.path.dirname(resource_file_path), exist_ok=True)
+                                with open(resource_file_path, 'wb') as file:
+                                    file.write(res.content)
+                            except requests.RequestException as e:
+                                print(f"Error fetching resource {full_url}: {e}")
+
+        except requests.RequestException as e:
+            print(f"Error fetching {current_url}: {e}")
+
+
+
+#convert zip
+def save_to_zip(output_dir, zip_path):
     """
-    Compress a folder into a ZIP file.
+    Compress the output directory into a ZIP file.
     """
-    with zipfile.ZipFile(output_zip, 'w') as zip_file:
-        for root, _, files in os.walk(folder):
+    with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+        for root, dirs, files in os.walk(output_dir):
             for file in files:
                 file_path = os.path.join(root, file)
-                zip_file.write(file_path, os.path.relpath(file_path, folder))
-    
-    print(f"Compressed {folder} into {output_zip}")
+                zipf.write(file_path, os.path.relpath(file_path, output_dir))
+    print(f"Files saved to {zip_path}")
 
-def download_websites(urls):
+
+
+#get urls
+#processing in background system
+#save zip
+def start_scraping():
     """
-    Download multiple websites, each into its own folder and ZIP file.
+    Extract and save the specified HTML pages and their resources.
     """
-    for url in urls:
-        domain = urlparse(url).netloc.replace('.', '_')
-        output_folder = os.path.join('websites', domain)
-        output_zip = f'{output_folder}.zip'
-        
-        print(f"Starting download for {url}")
-        download_website(url, output_folder)
-        compress_folder(output_folder, output_zip)
-        print(f"Completed download for {url}")
+    urls = url_entry.get("1.0", ctk.END).strip().split("\n")
+    if not urls:
+        messagebox.showerror("Input Error", "Please enter URLs")
+        return
 
-# List of URLs to download
-urls_to_download = [
-    'https://themesflat.co/html/cointexcrypto/cointex/log-in.html',
-    'https://themesflat.co/html/cointexcrypto/cointex/home.html',
-    'https://themesflat.co/html/cointexcrypto/cointex/home-search.html',
-    'https://themesflat.co/html/cointexcrypto/cointex/reset-pass.html',
-    'https://themesflat.co/html/cointexcrypto/cointex/choose-bank.html',
-    'https://themesflat.co/html/cointexcrypto/cointex/change-name.html',
-    'https://themesflat.co/html/cointexcrypto/cointex/payment-confirm.html',
-    'https://themesflat.co/html/cointexcrypto/cointex/wallet.html',
-    'https://themesflat.co/html/cointexcrypto/cointex/list-blog.html',
-    'https://themesflat.co/html/cointexcrypto/cointex/exchange-trade.html',
-    'https://themesflat.co/html/cointexcrypto/cointex/choose-cryptocurrency.html',
-    'https://themesflat.co/html/cointexcrypto/cointex/exchange.html',
-    'https://themesflat.co/html/cointexcrypto/cointex/tell-us-more.html',
-    'https://themesflat.co/html/cointexcrypto/cointex/register.html',
-    'https://themesflat.co/html/cointexcrypto/cointex/exchange-trade-approve.html',
-    'https://themesflat.co/html/cointexcrypto/cointex/cryptex-rating.html',
-    'https://themesflat.co/html/cointexcrypto/cointex/verification.html',
-    'https://themesflat.co/html/cointexcrypto/cointex/sell-quantity.html',
-    'https://themesflat.co/html/cointexcrypto/cointex/security-center.html',
-    'https://themesflat.co/html/cointexcrypto/cointex/user-info.html',
-    'https://themesflat.co/html/cointexcrypto/cointex/qr-code.html',
-    'https://themesflat.co/html/cointexcrypto/cointex/qr-code2.html',
-    'https://themesflat.co/html/cointexcrypto/cointex/profile.html',
-    'https://themesflat.co/html/cointexcrypto/cointex/recharge.html',
-    'https://themesflat.co/html/cointexcrypto/cointex/exchange-market.html',
-    'https://themesflat.co/html/cointexcrypto/cointex/change-password.html',
-    'https://themesflat.co/html/cointexcrypto/cointex/buy-quantity.html',
-    'https://themesflat.co/html/cointexcrypto/cointex/blog-detail.html',
-    'https://themesflat.co/html/cointexcrypto/cointex/account-freeze.html',
-    'https://themesflat.co/html/cointexcrypto/cointex/option.html',
-    'https://themesflat.co/html/cointexcrypto/cointex/earn.html',
-    'https://themesflat.co/html/cointexcrypto/cointex/verification-choose-type.html',
-    'https://themesflat.co/html/cointexcrypto/cointex/choose-payment.html',
+    output_dir = 'website_resources'
 
-    # Add more URLs here
-]
+    def worker():
+        status_label.configure(text="Scraping in progress...")
+        fetch_and_save_html_resources("", urls, output_dir)
 
-# Download all websites
-download_websites(urls_to_download)
+        # Ask user where to save the ZIP file
+        zip_path = filedialog.asksaveasfilename(defaultextension=".zip", filetypes=[("ZIP files", "*.zip")])
+        if zip_path:
+            try:
+                save_to_zip(output_dir, zip_path)
+                messagebox.showinfo("Saved", f"Files saved to {zip_path}")
+            except IOError as e:
+                messagebox.showerror("Save Error", f"Error saving file: {e}")
+
+        status_label.configure(text="Scraping completed")
+
+    # Run the worker function in a new thread
+    threading.Thread(target=worker, daemon=True).start()
+
+
+
+
+#User interface settings
+app = ctk.CTk()
+app.title("Website HTML Extractor")
+app.geometry("600x400")
+
+# Input Section
+url_label = ctk.CTkLabel(app, text="Enter URLs (one per line):")
+url_label.pack(pady=10)
+url_entry = ctk.CTkTextbox(app, width=500, height=150)
+url_entry.pack(pady=10)
+
+# Buttons
+start_button = ctk.CTkButton(app, text="Go to the site's address to get the source code output", command=start_scraping)
+start_button.pack(pady=10)
+
+# Output Section
+status_label = ctk.CTkLabel(app, text="")
+status_label.pack(pady=10)
+
+# Run the application
+app.mainloop()
